@@ -10,7 +10,7 @@ setClass("DelayedArray",
                             # the "seed contract" i.e. to support dim(),
                             # dimnames(), and extract_array().
 
-        index="list",       # List (possibly named) of subscripts as
+        index="list_OR_IndexList",       # List (possibly named) of subscripts as
                             # positive integer vectors, one vector per
                             # seed dimension. *Missing* list elements
                             # are allowed and represented by NULLs.
@@ -33,6 +33,14 @@ setClass("DelayedMatrix",
         index=list(NULL, NULL)
     )
 )
+
+## methods for DelayedArray object with IndexList @index slot.
+setMethod(".index", "DelayedArray", function(x) .index(x@index))
+
+setMethod(".clone_assign_index", "DelayedArray", function(x, index) {
+    x@index <- .clone_assign_index(x@index, index)
+    x
+})
 
 ### Automatic coercion method from DelayedArray to DelayedMatrix silently
 ### returns a broken object (unfortunately these dummy automatic coercion
@@ -66,11 +74,11 @@ setMethod("matrixClass", "DelayedArray", function(x) "DelayedMatrix")
     if (seed_ndim == 0L)
         return(wmsg2("'x@seed' must have dimensions"))
     ## 'index' slot.
-    if (length(x@index) != seed_ndim)
+    if (length(.index(x)) != seed_ndim)
         return(wmsg2("'x@index' must have one list element per dimension ",
                      "in 'x@seed'"))
-    if (!all(S4Vectors:::sapply_isNULL(x@index) |
-             vapply(x@index, is.integer, logical(1), USE.NAMES=FALSE)))
+    if (!all(S4Vectors:::sapply_isNULL(.index(x)) |
+             vapply(.index(x), is.integer, logical(1), USE.NAMES=FALSE)))
         return(wmsg2("every list element in 'x@index' must be either NULL ",
                      "or an integer vector"))
     ## In the context of validObject(), 'class(x)' is always "DelayedArray"
@@ -101,19 +109,27 @@ setValidity2("DelayedMatrix", .validate_DelayedMatrix)
 ###
 
 ### NOT exported but used in HDF5Array!
-new_DelayedArray <- function(seed=new("array"), Class="DelayedArray")
+new_DelayedArray <- function(seed=new("array"), index=c("list", "IndexList"), Class="DelayedArray")
 {
     seed <- remove_pristine_DelayedArray_wrapping(seed)
     seed_ndim <- length(dim(seed))
     if (seed_ndim == 2L)
         Class <- matrixClass(new(Class))
-    index <- vector(mode="list", length=seed_ndim)
+    index <- switch(
+        match.arg(index),
+        list = vector(mode="list", length=seed_ndim),
+        IndexList = IndexList(index=vector(mode="list", length=seed_ndim))
+    )
     new2(Class, seed=seed, index=index)
 }
 
-setGeneric("DelayedArray", function(seed) standardGeneric("DelayedArray"))
+setGeneric("DelayedArray",
+           function(seed, index="list") standardGeneric("DelayedArray"),
+           signature = "seed")
 
-setMethod("DelayedArray", "ANY", function(seed) new_DelayedArray(seed))
+setMethod("DelayedArray", "ANY", function(seed, index) {
+    new_DelayedArray(seed, index)
+})
 
 ### Calling DelayedArray() on a DelayedArray object is a no-op.
 setMethod("DelayedArray", "DelayedArray", function(seed) seed)
@@ -176,7 +192,7 @@ setMethod("DelayedArray", "DelayedArray", function(seed) seed)
                                index=object@index,
                                delayed_ops=delayed_ops,
                                check=FALSE)
-    if (identical(object@metaindex, seq_along(object@index)) &&
+    if (identical(object@metaindex, seq_along(.index(object))) &&
         identical(object@is_transposed, FALSE))
         return(ans)
     if (any(vapply(delayed_ops,
@@ -278,7 +294,7 @@ downgrade_to_DelayedArray_or_DelayedMatrix <- function(x)
 ###
 
 setMethod("dim", "DelayedArray",
-    function(x) get_Nindex_lengths(x@index, dim(seed(x)))
+    function(x) get_Nindex_lengths(.index(x), dim(seed(x)))
 )
 
 setMethod("isEmpty", "DelayedArray", function(x) any(dim(x) == 0L))
@@ -410,9 +426,9 @@ setMethod("dimnames", "DelayedArray",
     function(x)
     {
         x_seed_dimnames <- dimnames(seed(x))
-        ans <- lapply(seq_along(x@index),
+        ans <- lapply(seq_along(.index(x)),
                       get_Nindex_names_along,
-                        Nindex=x@index,
+                        Nindex=.index(x),
                         dimnames=x_seed_dimnames)
         if (all(S4Vectors:::sapply_isNULL(ans)))
             return(NULL)
@@ -438,7 +454,7 @@ setMethod("dimnames", "DelayedArray",
 
 .set_DelayedArray_dimnames <- function(x, value)
 {
-    value <- .normalize_dimnames_replacement_value(value, length(x@index))
+    value <- .normalize_dimnames_replacement_value(value, length(.index(x)))
 
     ## We quickly identify a no-op situation. While doing so, we are careful to
     ## not trigger a copy of the "index" slot (which can be big). The goal is
@@ -447,10 +463,10 @@ setMethod("dimnames", "DelayedArray",
     touched_idx <- which(mapply(
         function(along, names)
             !identical(
-                get_Nindex_names_along(x@index, x_seed_dimnames, along),
+                get_Nindex_names_along(.index(x), x_seed_dimnames, along),
                 names
             ),
-        seq_along(x@index), value,
+        seq_along(.index(x)), value,
         USE.NAMES=FALSE
     ))
     if (length(touched_idx) == 0L)
@@ -458,9 +474,9 @@ setMethod("dimnames", "DelayedArray",
 
     x <- downgrade_to_DelayedArray_or_DelayedMatrix(x)
     x_seed_dim <- dim(seed(x))
-    x@index[touched_idx] <- mapply(
+    .index(x)[touched_idx] <- mapply(
         function(along, names) {
-            i <- x@index[[along]]
+            i <- .index(x)[[along]]
             if (is.null(i))
                 i <- seq_len(x_seed_dim[[along]])  # expand 'i'
             setNames(i, names)
@@ -633,8 +649,8 @@ register_delayed_op <- function(x, FUN, Largs=list(), Rargs=list(),
 
 .subset_DelayedArray_by_Nindex <- function(x, user_Nindex)
 {
-    stopifnot(is.list(user_Nindex))
-    x_index <- x@index
+    stopifnot(is(user_Nindex, "list_OR_IndexList"))
+    x_index <- .index(x)
     x_ndim <- length(x_index)
     x_seed_dim <- dim(seed(x))
     x_seed_dimnames <- dimnames(seed(x))
@@ -654,9 +670,9 @@ register_delayed_op <- function(x, FUN, Largs=list(), Rargs=list(),
         if (along == 1L)
             x_delayed_ops <- .subset_delayed_ops_args(x_delayed_ops, subscript)
     }
-    if (!identical(x@index, x_index)) {
+    if (!identical(.index(x), x_index)) {
         x <- downgrade_to_DelayedArray_or_DelayedMatrix(x)
-        x@index <- x_index
+        x <- .clone_assign_index(x, x_index)
         if (!identical(x@delayed_ops, x_delayed_ops))
             x@delayed_ops <- x_delayed_ops
     }
@@ -831,7 +847,7 @@ setReplaceMethod("[", "DelayedArray", .subassign_DelayedArray)
 {
     if (!isTRUEorFALSE(drop))
         stop("'drop' must be TRUE or FALSE")
-    ans <- extract_array(seed(x), unname(x@index))
+    ans <- extract_array(seed(x), unname(.index(x)))
     ans <- set_dim(ans, dim(x))
     ans <- .execute_delayed_ops(ans, x@delayed_ops)
     ans <- set_dimnames(ans, dimnames(x))

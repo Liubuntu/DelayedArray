@@ -32,7 +32,8 @@ exportClasses(
 
     ## RleArray-class.R:
     RleArraySeed, SolidRleArraySeed, RleRealizationSink, ChunkedRleArraySeed,
-    RleArray, RleMatrix
+    RleArray, RleMatrix,
+    IndexList
 )
 
 
@@ -103,7 +104,9 @@ export(
 
     split.DelayedArray,
 
-    t.DelayedMatrix
+    t.DelayedMatrix,
+
+    IndexList
 )
 
 
